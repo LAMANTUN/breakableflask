@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 import os
-import pickle
+import json
 from base64 import b64decode,b64encode
 from binascii import hexlify, unhexlify
-from os import popen
+import subprocess
+import shlex
 from lxml import etree
 import html
 from Crypto.Cipher import AES
 from Crypto import Random
 import argparse
 import sys
+import re
+from ast import literal_eval
 
 
-from flask import Flask, request, make_response, render_template_string
+from flask import Flask, request, make_response, render_template_string, escape
 
 # Config stuff
 KEY=Random.new().read(32) # 256 bit key for extra security!!!
@@ -99,7 +102,8 @@ def decrypt(value, key):
 
 
 def rp(command):
-    return popen(command).read()
+    # Fonction désactivée pour raisons de sécurité
+    raise Exception("Command execution disabled for security reasons")
 
 
 app = Flask(__name__)
@@ -124,7 +128,7 @@ def index():
     """
 
 
-# 1. Cookie setter/getter
+# 1. Cookie setter/getter (FIXED: Using JSON instead of pickle)
 @app.route('/cookie', methods = ['POST', 'GET'])
 def cookie():
     cookieValue = None
@@ -134,12 +138,15 @@ def cookie():
         cookieValue = request.form['value']
         value = cookieValue
     elif 'value' in request.cookies:
-        cookieValue = pickle.loads(b64decode(request.cookies['value'])) 
+        try:
+            cookieValue = json.loads(b64decode(request.cookies['value']).decode('utf-8'))
+        except:
+            cookieValue = None
     
         
     form = """
     <html>
-       <body>Cookie value: """ + str(cookieValue) +"""
+       <body>Cookie value: """ + html.escape(str(cookieValue)) +"""
           <form action = "/cookie" method = "POST">
              <p><h3>Enter value to be stored in cookie</h3></p>
              <p><input type = 'text' name = 'value'/></p>
@@ -151,21 +158,38 @@ def cookie():
     resp = make_response(form)
     
     if value:
-        resp.set_cookie('value', b64encode(pickle.dumps(value)))
+        resp.set_cookie('value', b64encode(json.dumps(value).encode('utf-8')))
 
     return resp
 
 
 
-# 2. DNS lookup
+# 2. DNS lookup (FIXED: Using subprocess with validation)
 @app.route('/lookup', methods = ['POST', 'GET'])
 def lookup():
     address = None
+    result = ""
     if request.method == 'POST':
         address = request.form['address']
+        # Validation: only allow valid domain names and IP addresses
+        if address and re.match(r'^[a-zA-Z0-9.-]+$', address):
+            try:
+                output = subprocess.check_output(['nslookup', address], 
+                                                stderr=subprocess.STDOUT, 
+                                                timeout=5,
+                                                text=True)
+                result = html.escape(output).replace('\n', '<br>')
+            except subprocess.TimeoutExpired:
+                result = "Lookup timed out"
+            except subprocess.CalledProcessError as e:
+                result = html.escape(str(e.output))
+            except Exception as e:
+                result = "Error performing lookup"
+        elif address:
+            result = "Invalid address format"
     return """
     <html>
-       <body>""" + "Result:\n<br>\n" + (rp("nslookup " + address).replace('\n', '\n<br>')  if address else "") + """
+       <body>""" + ("Result:\n<br>\n" + result if address else "") + """
           <form action = "/lookup" method = "POST">
              <p><h3>Enter address to lookup</h3></p>
              <p><input type = 'text' name = 'address'/></p>
@@ -176,15 +200,25 @@ def lookup():
     """
 
     
-# 3. Python expression evaluation
+# 3. Python expression evaluation (FIXED: Using literal_eval for safe evaluation)
 @app.route('/evaluate', methods = ['POST', 'GET'])
 def evaluate():
     expression = None
+    result = ""
     if request.method == 'POST':
         expression = request.form['expression']
+        if expression:
+            try:
+                # Only allow safe literal expressions (numbers, strings, lists, dicts, tuples, booleans, None)
+                evaluated = literal_eval(expression)
+                result = html.escape(str(evaluated)).replace('\n', '<br>')
+            except (ValueError, SyntaxError) as e:
+                result = "Invalid expression: Only literal values are allowed (numbers, strings, lists, dicts, etc.)"
+            except Exception as e:
+                result = "Error evaluating expression"
     return """
     <html>
-       <body>""" + "Result: " + (str(eval(expression)).replace('\n', '\n<br>')  if expression else "") + """
+       <body>""" + ("Result: " + result if expression else "") + """
           <form action = "/evaluate" method = "POST">
              <p><h3>Enter expression to evaluate</h3></p>
              <p><input type = 'text' name = 'expression'/></p>
@@ -196,21 +230,26 @@ def evaluate():
 
 
 
-# 4. XML Parser
+# 4. XML Parser (FIXED: Secure parser configuration)
 @app.route('/xml', methods = ['POST', 'GET'])
 def xml():
     parsed_xml = None
     if request.method == 'POST':
         xml = request.form['xml']
-        parser = etree.XMLParser(no_network=False, dtd_validation=False, load_dtd=True, huge_tree=True)
-        #try:
-        doc = etree.fromstring(xml.encode(), parser)
-        parsed_xml = etree.tostring(doc).decode('utf8')
-        #except:
-            #pass
+        # Secure parser: disable external entities and DTD processing
+        parser = etree.XMLParser(no_network=True, 
+                                dtd_validation=False, 
+                                load_dtd=False, 
+                                resolve_entities=False,
+                                huge_tree=False)
+        try:
+            doc = etree.fromstring(xml.encode(), parser)
+            parsed_xml = etree.tostring(doc).decode('utf8')
+        except Exception as e:
+            parsed_xml = "Error parsing XML"
     return """
        <html>
-          <body>""" + "Result:\n<br>\n" + html.escape(parsed_xml) if parsed_xml else "" + """
+          <body>""" + ("Result:\n<br>\n" + html.escape(parsed_xml) if parsed_xml else "") + """
              <form action = "/xml" method = "POST">
                 <p><h3>Enter xml to parse</h3></p>
                 <textarea class="input" name="xml" cols="40" rows="5"></textarea>
@@ -221,7 +260,7 @@ def xml():
        """
 
 
-# 5. View application configuration settings 
+# 5. View application configuration settings (FIXED: No information leakage)
 @app.route('/config', methods = ['GET'])
 def config():
     key = None
@@ -230,36 +269,40 @@ def config():
     key = request.args.get('key')
     viewable = [a for a in CONFIG.keys() if a.startswith('app_')]
     crypt = lambda x : hexlify(encrypt(x.encode(), KEY)).decode('utf8')
-    configs = '\n'.join(['<a href="/config?key=%s">%s</a><br>' %(crypt(a), a ) for a in viewable])
+    configs = '\n'.join(['<a href="/config?key=%s">%s</a><br>' %(crypt(a), html.escape(a)) for a in viewable])
     unviewable = [a for a in CONFIG.keys() if not a.startswith('app_')]
-    nconfigs = '\n'.join(['%s - Not Viewable<br>' %(a) for a in unviewable])
+    nconfigs = '\n'.join(['%s - Not Viewable<br>' %(html.escape(a)) for a in unviewable])
     if key:
         try:
             kv = unhexlify(key)
             decrypted_key = decrypt(kv, KEY).decode('utf8')
         except Exception as e:
-            return str(e)
+            # Don't leak decryption errors (padding oracle vulnerability)
+            return "Invalid key"
         
         if decrypted_key and decrypted_key in CONFIG.keys():
             config_out = CONFIG[decrypted_key]
+        else:
+            return "Invalid key"
 
     return """
     <html>
       <body>
          <p><h3>Select config value to view</h3></p>
         """ + configs + "\n" + nconfigs + """
-        """ + ('\n<br><br>Config value:<br><b>' + decrypted_key + '</b>: <i>' + config_out + '</i><br>\n' if decrypted_key else '') + """
+        """ + ('\n<br><br>Config value:<br><b>' + html.escape(decrypted_key) + '</b>: <i>' + html.escape(config_out) + '</i><br>\n' if decrypted_key else '') + """
       </body>
     </html>
     """
 
 
-# 6. Receive personalised greeting
+# 6. Receive personalised greeting (FIXED: Escape user input)
 @app.route('/sayhi', methods = ['POST', 'GET'])
 def sayhi():
    name = ''
    if request.method == 'POST':
-      name = '<br>Hello %s!<br><br>' %(request.form['name'])
+      # Escape user input to prevent SSTI
+      name = '<br>Hello %s!<br><br>' %(html.escape(request.form['name']))
 
    template = """
    <html>
@@ -276,25 +319,29 @@ def sayhi():
    return render_template_string(template)
 
 
-# 7. List products and services
+# 7. List products and services (FIXED: Using parameterized queries)
 @app.route('/listservices', methods = ['GET'])
 def listservices():
     param = 'category'
     category = None
     category = request.args.get(param)
     columns = [b['name'] for b in [a for a in DATABASE_TABLES if a['table_name'] == 'public_stuff'][0]['columns']]
-    column_html = '\n'.join(['<th>{}</th>'.format(a) for a in columns])
-    where = ''
-    if category:
-        where = " WHERE {} = '{}'".format(param, category)
+    column_html = '\n'.join(['<th>{}</th>'.format(html.escape(a)) for a in columns])
     
     try:
-        cursor.execute(query_build('SELECT * from public_stuff{}'.format(where)))
+        if category:
+            # Use parameterized query to prevent SQL injection
+            if args.database_type == 'oracle':
+                cursor.execute('SELECT * from public_stuff WHERE {} = :category'.format(param), {'category': category})
+            else:
+                cursor.execute(query_build('SELECT * from public_stuff WHERE {} = ?'.format(param)), (category,))
+        else:
+            cursor.execute(query_build('SELECT * from public_stuff'))
         results = cursor.fetchall()
     except Exception as e:
-        return str(e)
+        return "Error retrieving data"
     
-    linker = lambda x,y : '<a href="/listservices?{}={}">{}</a>'.format(param, y, y) if x==columns.index(param) else str(y)
+    linker = lambda x,y : '<a href="/listservices?{}={}">{}</a>'.format(param, html.escape(str(y)), html.escape(str(y))) if x==columns.index(param) else html.escape(str(y))
     results_html = '<tr>\n<td>' + '</tr>\n<tr>\n<td>'.join(['</td>\n<td>'.join([linker(c, b) for b, c in zip(a, range(0,len(a)))]) for a in results]) + '\n</tr>'
     
     return """
