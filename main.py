@@ -15,7 +15,7 @@ import re
 from ast import literal_eval
 
 
-from flask import Flask, request, make_response, render_template_string, escape
+from flask import Flask, request, make_response, escape
 
 # Config stuff
 KEY=Random.new().read(32) # 256 bit key for extra security!!!
@@ -302,9 +302,9 @@ def sayhi():
    name = ''
    if request.method == 'POST':
       # Escape user input to prevent SSTI
-      name = '<br>Hello %s!<br><br>' %(html.escape(request.form['name']))
+      name = '<br>Hello ' + html.escape(request.form['name']) + '!<br><br>'
 
-   template = """
+   response = """
    <html>
       <body>
          <form action = "/sayhi" method = "POST">
@@ -312,11 +312,11 @@ def sayhi():
             <p><input type = 'text' name = 'name'/></p>
             <p><input type = 'submit' value = 'Submit'/></p>
          </form>
-      %s
+         """ + name + """
       </body>
    </html>
-   """ %(name)
-   return render_template_string(template)
+   """
+   return response
 
 
 # 7. List products and services (FIXED: Using parameterized queries)
@@ -326,22 +326,27 @@ def listservices():
     category = None
     category = request.args.get(param)
     columns = [b['name'] for b in [a for a in DATABASE_TABLES if a['table_name'] == 'public_stuff'][0]['columns']]
-    column_html = '\n'.join(['<th>{}</th>'.format(html.escape(a)) for a in columns])
+    column_html = '\n'.join(['<th>' + html.escape(a) + '</th>' for a in columns])
+    
+    # Validate column name against whitelist to prevent SQL injection
+    if param not in columns:
+        return "Invalid parameter"
     
     try:
         if category:
             # Use parameterized query to prevent SQL injection
             if args.database_type == 'oracle':
-                cursor.execute('SELECT * from public_stuff WHERE {} = :category'.format(param), {'category': category})
+                # param is validated against columns list
+                cursor.execute('SELECT * from public_stuff WHERE ' + param + ' = :category', {'category': category})
             else:
-                cursor.execute(query_build('SELECT * from public_stuff WHERE {} = ?'.format(param)), (category,))
+                cursor.execute(query_build('SELECT * from public_stuff WHERE ' + param + ' = ?'), (category,))
         else:
             cursor.execute(query_build('SELECT * from public_stuff'))
         results = cursor.fetchall()
     except Exception as e:
         return "Error retrieving data"
     
-    linker = lambda x,y : '<a href="/listservices?{}={}">{}</a>'.format(param, html.escape(str(y)), html.escape(str(y))) if x==columns.index(param) else html.escape(str(y))
+    linker = lambda x,y : '<a href="/listservices?' + param + '=' + html.escape(str(y)) + '">' + html.escape(str(y)) + '</a>' if x==columns.index(param) else html.escape(str(y))
     results_html = '<tr>\n<td>' + '</tr>\n<tr>\n<td>'.join(['</td>\n<td>'.join([linker(c, b) for b, c in zip(a, range(0,len(a)))]) for a in results]) + '\n</tr>'
     
     return """
